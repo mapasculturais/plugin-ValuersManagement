@@ -21,7 +21,7 @@ class Plugin extends \MapasCulturais\Plugin
         $self = $this;
 
         $app->hook(
-            "component(opportunity-phase-config-evaluation).evaluation-step-header:end",
+            "component(opportunity-evaluation-committee).select-entity:end",
             function () {
                 $entity = $this->controller->requestedEntity;
                 $this->part("evalmaster--upload", ["entity" => $entity]);
@@ -98,7 +98,8 @@ class Plugin extends \MapasCulturais\Plugin
         if (empty($data)) {
             $this->pluginLog("[WARN] Planilha vazia após leitura.");
         } else {
-            $this->buildList($data, $file->owner);
+            $committee = $request["committee"] ?? null;
+            $this->buildList($data, $file->owner, $committee);
             $this->pluginLog("[OK] buildList executado");
 
             // Deleta o arquivo após o uso, como no plugin original
@@ -110,7 +111,7 @@ class Plugin extends \MapasCulturais\Plugin
         return true;
     }
 
-    public function buildList($values, Opportunity $opportunity)
+    public function buildList($values, Opportunity $opportunity, $committee)
     {
         $app = App::i();
         $this->pluginLog(
@@ -162,42 +163,50 @@ class Plugin extends \MapasCulturais\Plugin
                     continue;
                 }
 
-                // **PASSO CRUCIAL: Atribui a permissão à inscrição**
-                $registration->valuersExcludeList = [];
-                $registration->valuersIncludeList = array_map(function ($item) {
-                    return "$item";
-                }, $users);
+                $related_agents = $registration->opportunity->evaluationMethodConfiguration->relatedAgents;
 
-                $registration->save(true);
-                // $app->em->clear(); // Limpa o cache do Doctrine
+                $filter_users = [];
+                foreach ($users as $user_id) {
+                    $user = $app->repo("User")->find($user_id);
 
-                // Recarrega a inscrição para garantir que está gerenciada pelo EntityManager
-                $registration = $app
-                    ->repo("Registration")
-                    ->find($registration->id);
-
-                // Opcional: A criação da entidade RegistrationEvaluation
-                foreach ($users as $userId) {
-                    $existingEval = $app
-                        ->repo("RegistrationEvaluation")
-                        ->findOneBy([
-                            "registration" => $registration,
-                            "user" => $app->repo("User")->find($userId),
-                        ]);
-
-                    if (!$existingEval) {
-                        $committee = $this->getCommitteeFromAgent(
-                            $opportunity,
-                            array_search($userId, $users),
-                        );
-                        $evaluation = new \MapasCulturais\Entities\RegistrationEvaluation();
-                        $evaluation->registration = $registration;
-                        $evaluation->user = $app->repo("User")->find($userId);
-                        $evaluation->committee = $committee;
-                        $evaluation->createTimestamp = new \DateTime();
-                        $app->em->persist($evaluation);
+                    if($related_agents[$committee]) {
+                        foreach($related_agents[$committee] as $relation) {
+                            if($relation->id == $user->profile->id) {
+                               $filter_users[] = $user->id;
+                            }
+                        }
                     }
                 }
+
+                if (empty($filter_users)) {
+                    $this->pluginLog(
+                        "[buildList][WARN] Nenhum usuário relacionado ao comitê $committee encontrado na inscrição $number.",
+                    );
+                    continue;
+                }
+
+                $include_list = array_map(fn($item) => (string) $item, $filter_users);
+
+                $valuers_exceptions_list = [
+                    'exclude' => [],
+                    'include' => $include_list,
+                ];
+
+                $conn->update(
+                    'registration',
+                    ['valuers_exceptions_list' => json_encode($valuers_exceptions_list)],
+                    ['id' => $registration->id]
+                );
+
+                $valuers = $registration->valuers ?: [];
+                foreach ($filter_users as $user_id) {
+                    $valuers[$user_id] = $committee;
+                }
+                
+                if($valuers) {
+                    $conn->update('registration', ['valuers' => json_encode($valuers)], ['id' => $registration->id]);
+                }
+
                 $app->em->flush();
 
                 $this->pluginLog(
@@ -221,6 +230,12 @@ class Plugin extends \MapasCulturais\Plugin
             ->repo("User")
             ->findBy(["id" => $allValuerUserIds]);
         $opportunity->enqueueToPCacheRecreation($usersToUpdate);
+
+        /** @var EvaluationMethodConfigurationAgentRelation[] */ 
+        $relations = $opportunity->evaluationMethodConfiguration->getAgentRelations();
+        foreach ($relations as $relation) {
+            $relation->updateSummary();
+        }
 
         $this->pluginLog("[buildList] Finalizado.");
     }

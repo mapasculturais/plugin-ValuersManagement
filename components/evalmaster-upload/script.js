@@ -12,7 +12,11 @@ app.component('evalmaster-upload', {
         entity: {
             type: Entity,
             requered: true
-        }
+        },
+        group: {
+            type: String,
+            default: 'group-admin'
+        },
     },
 
     data() {
@@ -42,7 +46,8 @@ app.component('evalmaster-upload', {
 
             let args = {
                 entity: this.entity.opportunity.id,
-                file: this.entityFile.id
+                file: this.entityFile.id,
+                committee: this.group
             };
 
             let url = Utils.createUrl('opportunity', 'valuersmanagement', args);
