@@ -3,148 +3,322 @@
 namespace ValuersManagement;
 
 use MapasCulturais\App;
-use MapasCulturais\Controllers\Opportunity as ControllersOpportunity;
-use MapasCulturais\Definitions\FileGroup;
 use MapasCulturais\Entities\Opportunity;
-use MapasCulturais\Entities\Registration;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 
 class Plugin extends \MapasCulturais\Plugin
 {
-    function __construct($config = [])
-    {
-        $config += [];
-
-        parent::__construct($config);
-    }
-
-
     public function _init()
     {
         $app = App::i();
 
-        $app->view->enqueueStyle('app-v2', 'ValuersManagement-v2', 'css/plugin-ValuersManagement.css');
+        $app->view->enqueueStyle(
+            "app-v2",
+            "ValuersManagement-v2",
+            "css/plugin-ValuersManagement.css",
+        );
 
         $self = $this;
 
-        $app->hook("component(opportunity-phase-config-evaluation).evaluation-step-header:end", function () {
-            $entity = $this->controller->requestedEntity;
-            $this->part('evalmaster--upload', ['entity' => $entity]);
-        });
+        $app->hook(
+            "component(opportunity-evaluation-committee).select-entity:end",
+            function () {
+                $entity = $this->controller->requestedEntity;
+                $this->part("evalmaster--upload", ["entity" => $entity]);
+            },
+        );
 
-        $app->hook('GET(opportunity.valuersmanagement)', function () use ($self, $app) {
-            ini_set('max_execution_time', '0');
-            /** @var ControllersOpportunity $this */
+        $app->hook("GET(opportunity.valuersmanagement)", function () use (
+            $self,
+            $app,
+        ) {
+            ini_set("max_execution_time", "0");
             $this->requireAuthentication();
-            $opportunity = $app->repo('Opportunity')->find($this->data['entity']);
-            if(!$opportunity) {
+
+            $opportunity = $app
+                ->repo("Opportunity")
+                ->find($this->data["entity"]);
+            if (!$opportunity) {
+                $app->log->error(
+                    "[ValuersManagement] Oportunidade não encontrada",
+                );
                 $app->pass();
             }
 
-            $opportunity->checkPermission('@control');
+            $opportunity->checkPermission("@control");
 
             $request = $this->data;
+            $self->pluginLog(
+                "[Hook] Requisição recebida: " . json_encode($request),
+            );
 
-            if($self->valuersmanagement($request)) {
+            if ($self->valuersmanagement($request)) {
                 $this->json(true);
             }
         });
     }
 
+    protected function pluginLog(string $message)
+    {
+        $logDir = __DIR__ . "/logs";
+        if (!is_dir($logDir)) {
+            mkdir($logDir, 0777, true);
+        }
+
+        $logFile = $logDir . "/valuersmanagement.log";
+        $date = date("Y-m-d H:i:s");
+        $formattedMessage = "[$date] $message" . PHP_EOL;
+
+        file_put_contents($logFile, $formattedMessage, FILE_APPEND);
+    }
+
     public function valuersmanagement($request)
     {
         $app = App::i();
+        $this->pluginLog(
+            "[INICIO] valuersmanagement - request: " . json_encode($request),
+        );
 
-        if ($file = $app->repo("File")->find($request['file'])) {
-            $spreadsheet = IOFactory::load($file->getPath());
-            $data = $this->getSpreadsheetData($spreadsheet);
-            $this->buildList($data, $file->owner);
-            
-            $file = $app->repo("File")->find($request['file']);
-            $file->delete(true);
+        $file = $app->repo("File")->find($request["file"]);
+        if (!$file) {
+            $this->pluginLog(
+                "[ERRO] Arquivo não encontrado: ID " . $request["file"],
+            );
+            return true;
         }
 
+        $this->pluginLog("[OK] Arquivo encontrado: " . $file->getPath());
+
+        $spreadsheet = IOFactory::load($file->getPath());
+        $this->pluginLog("[OK] Planilha carregada");
+
+        $data = $this->getSpreadsheetData($spreadsheet);
+        $this->pluginLog("[OK] Linhas extraídas: " . count($data));
+
+        if (empty($data)) {
+            $this->pluginLog("[WARN] Planilha vazia após leitura.");
+        } else {
+            $committee = $request["committee"] ?? null;
+            $this->buildList($data, $file->owner, $committee);
+            $this->pluginLog("[OK] buildList executado");
+
+            // Deleta o arquivo após o uso, como no plugin original
+            $app->repo("File")->find($request["file"])->delete(true);
+            $this->pluginLog("[OK] Arquivo deletado.");
+        }
+
+        $this->pluginLog("[FIM] valuersmanagement");
         return true;
     }
 
-    function getNumber($item) {
-        $k = null;
-        foreach($item as $key => $value) {
-            if(in_array(mb_strtolower($key), ['inscrição', 'inscricao', 'number', 'número'])) {
-                $k = $key;
-                break;
-            }
-        }
-
-        return $item[$k];
-    }
-
-    function getAgent($item) {
-        $k = null;
-        foreach($item as $key => $value) {
-            if(in_array(mb_strtolower($key), ['agente', 'id do agente', 'id do avaliador'])) {
-                $k = $key;
-                break;
-            }
-        }
-
-        return $item[$k];
-    }
-
-    public function buildList($values, Opportunity $opportunity) {
+    public function buildList($values, Opportunity $opportunity, $committee)
+    {
         $app = App::i();
-        
-        $data = [];
+        $this->pluginLog(
+            "[buildList] Iniciado com " . count($values) . " linhas.",
+        );
 
-        foreach($values as $item) {
+        // Agrupa os avaliadores por número de inscrição, como no plugin original
+        $groupedData = [];
+        foreach ($values as $item) {
             $number = $this->getNumber($item);
-            $data[$number] = $data[$number] ?? [];
-            $data[$number][] = $this->getAgent($item);
-        }
-
-        $_eval_users_id = [];
-        $n_total = count($data);
-        $n = 0;
-        foreach($data as $number => $valuers) {
-            $n++;
-            /** @var Registration $registration */
-            $registration = $app->repo('Registration')->findOneBy(['opportunity' => $opportunity, 'number' => $number]);
-
-            $ids = implode(', ', $valuers);
-
-            $conn = $app->em->getConnection();
-            $users = $conn->fetchFirstColumn("SELECT user_id FROM agent WHERE id in ($ids)");
-            
-            foreach($users as $usr){
-                $_eval_users_id[] = $usr;
+            if ($number) {
+                $groupedData[$number] = $groupedData[$number] ?? [];
+                $agentId = $this->getAgent($item);
+                if ($agentId) {
+                    $groupedData[$number][] = $agentId;
+                }
             }
-
-            $registration->__skipQueuingPCacheRecreation = true;
-         
-            $registration->valuersExcludeList = [];
-            $registration->valuersIncludeList = array_map(function($item) { return "$item"; }, $users);
-            
-            $registration->save(true);
-
-            $app->log->debug("({$n}/{$n_total}) Definindo avaliadores para a inscrição $number: $ids");
-
-            $app->em->clear();
         }
 
-        $_eval_users_id = array_unique($_eval_users_id);
+        $allValuerUserIds = [];
+        $conn = $app->em->getConnection();
 
-        $users = $app->repo('User')->findBy(['id' => $_eval_users_id]);
-        $opportunity->enqueueToPCacheRecreation($users);
+        foreach ($groupedData as $number => $agentIds) {
+            try {
+                $this->pluginLog("[buildList] Processando inscrição $number.");
+
+                $registration = $app->repo("Registration")->findOneBy([
+                    "opportunity" => $opportunity,
+                    "number" => $number,
+                ]);
+
+                if (!$registration) {
+                    $this->pluginLog(
+                        "[buildList][WARN] Inscrição $number não encontrada.",
+                    );
+                    continue;
+                }
+
+                // Obtém os user_id dos agent_id fornecidos
+                $ids = implode(", ", array_unique($agentIds));
+                $users = $conn->fetchFirstColumn(
+                    "SELECT user_id FROM agent WHERE id IN ($ids)",
+                );
+
+                if (empty($users)) {
+                    $this->pluginLog(
+                        "[buildList][WARN] Nenhum usuário encontrado para os agentes na inscrição $number.",
+                    );
+                    continue;
+                }
+
+                $related_agents = $registration->opportunity->evaluationMethodConfiguration->relatedAgents;
+
+                $filter_users = [];
+                foreach ($users as $user_id) {
+                    $user = $app->repo("User")->find($user_id);
+
+                    if($related_agents[$committee]) {
+                        foreach($related_agents[$committee] as $relation) {
+                            if($relation->id == $user->profile->id) {
+                               $filter_users[] = $user->id;
+                            }
+                        }
+                    }
+                }
+
+                if (empty($filter_users)) {
+                    $this->pluginLog(
+                        "[buildList][WARN] Nenhum usuário relacionado ao comitê $committee encontrado na inscrição $number.",
+                    );
+                    continue;
+                }
+
+                $include_list = array_map(fn($item) => (string) $item, $filter_users);
+
+                $valuers_exceptions_list = [
+                    'exclude' => [],
+                    'include' => $include_list,
+                ];
+
+                $conn->update(
+                    'registration',
+                    ['valuers_exceptions_list' => json_encode($valuers_exceptions_list)],
+                    ['id' => $registration->id]
+                );
+
+                $valuers = $registration->valuers ?: [];
+                foreach ($filter_users as $user_id) {
+                    $valuers[$user_id] = $committee;
+                }
+                
+                if($valuers) {
+                    $conn->update('registration', ['valuers' => json_encode($valuers)], ['id' => $registration->id]);
+                }
+
+                $app->em->flush();
+
+                $this->pluginLog(
+                    "[buildList] Avaliadores definidos para inscrição $number: " .
+                        implode(", ", $users),
+                );
+
+                // Coleta todos os user_id para a atualização de cache final
+                $allValuerUserIds = array_merge($allValuerUserIds, $users);
+            } catch (\Throwable $e) {
+                $this->pluginLog(
+                    "[buildList][ERRO] Exceção na inscrição $number: " .
+                        $e->getMessage(),
+                );
+            }
+        }
+
+        // Atualiza o cache dos avaliadores para as oportunidades
+        $allValuerUserIds = array_unique($allValuerUserIds);
+        $usersToUpdate = $app
+            ->repo("User")
+            ->findBy(["id" => $allValuerUserIds]);
+        $opportunity->enqueueToPCacheRecreation($usersToUpdate);
+
+        /** @var EvaluationMethodConfigurationAgentRelation[] */ 
+        $relations = $opportunity->evaluationMethodConfiguration->getAgentRelations();
+        foreach ($relations as $relation) {
+            $relation->updateSummary();
+        }
+
+        $this->pluginLog("[buildList] Finalizado.");
+    }
+
+    protected function getCommitteeFromAgent(Opportunity $opportunity, $agentId)
+    {
+        $app = App::i();
+
+        $emc = $app
+            ->repo("EvaluationMethodConfiguration")
+            ->findOneBy(["opportunity" => $opportunity]);
+
+        if (!$emc) {
+            $this->pluginLog(
+                "[getCommitteeFromAgent] Configuração de avaliação não encontrada.",
+            );
+            return null;
+        }
+
+        $result = $app->em
+            ->getConnection()
+            ->fetchAssociative(
+                "SELECT type FROM agent_relation WHERE object_type = 'MapasCulturais\\Entities\\EvaluationMethodConfiguration' AND object_id = :objectId AND agent_id = :agentId",
+                [
+                    "objectId" => $emc->id,
+                    "agentId" => $agentId,
+                ],
+            );
+
+        if ($result && isset($result["type"])) {
+            return $result["type"];
+        }
+
+        return null;
+    }
+
+    function getNumber($item)
+    {
+        foreach ($item as $key => $value) {
+            if (
+                in_array(mb_strtolower($key), [
+                    "inscrição",
+                    "inscricao",
+                    "number",
+                    "número",
+                ])
+            ) {
+                return $value;
+            }
+        }
+        return null;
+    }
+
+    function getAgent($item)
+    {
+        foreach ($item as $key => $value) {
+            if (
+                in_array(mb_strtolower($key), [
+                    "agente",
+                    "id do agente",
+                    "id do avaliador",
+                ])
+            ) {
+                return $value;
+            }
+        }
+        return null;
     }
 
     public function getSpreadsheetData($spreadsheet)
     {
         $worksheet = $spreadsheet->getActiveSheet();
         $header = [];
+        $data = [];
         $firstRow = true;
+
         foreach ($worksheet->getRowIterator() as $row) {
             if ($firstRow) {
                 $header = $this->getSpreadsheetHeader($row);
+                $this->pluginLog(
+                    "[getSpreadsheetData] Cabeçalho detectado: " .
+                        json_encode($header),
+                );
                 $firstRow = false;
                 continue;
             }
@@ -155,15 +329,15 @@ class Plugin extends \MapasCulturais\Plugin
             $rowData = [];
             $columnIndex = 0;
             foreach ($cellIterator as $cell) {
-                $headerValue = $header[$columnIndex];
+                $headerValue = $header[$columnIndex] ?? "col$columnIndex";
                 $cellValue = $cell->getValue();
-                if($cellValue){
+                if ($cellValue !== null && $cellValue !== "") {
                     $rowData[$headerValue] = $cellValue;
                 }
                 $columnIndex++;
             }
 
-            if($rowData){
+            if ($rowData) {
                 $data[] = $rowData;
             }
         }
@@ -187,8 +361,18 @@ class Plugin extends \MapasCulturais\Plugin
     public function register()
     {
         $app = App::i();
-
-        $file_group_definition = new FileGroup('evalmaster', ['^text/csv$', '^application/vnd.ms-excel$', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'], 'O arquivo enviado não é válido.', true, null, true);
-        $app->registerFileGroup('opportunity', $file_group_definition);
+        $file_group_definition = new \MapasCulturais\Definitions\FileGroup(
+            "evalmaster",
+            [
+                '^text/csv$',
+                '^application/vnd.ms-excel$',
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ],
+            "O arquivo enviado não é válido.",
+            true,
+            null,
+            true,
+        );
+        $app->registerFileGroup("opportunity", $file_group_definition);
     }
 }

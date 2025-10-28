@@ -10,4 +10,4 @@ $this->import(
 );
 ?>
 
-<evalmaster-upload :entity="phase"></evalmaster-upload>
+<evalmaster-upload :entity="entity" :group="group"></evalmaster-upload>
