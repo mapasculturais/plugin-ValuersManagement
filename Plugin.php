@@ -20,6 +20,38 @@ class Plugin extends \MapasCulturais\Plugin
 
         $self = $this;
 
+        // Endpoint para download do modelo de planilha
+        $app->hook("GET(opportunity.sample-ValuersManagement)", function () {
+
+            $this->requireAuthentication();
+
+            $file = __DIR__ . "/files/sample-ValuersManagement.xlsx";
+        
+            if (!is_file($file)) {
+                http_response_code(404);
+                exit("Arquivo não encontrado.");
+            }
+        
+            // Limpa qualquer buffer de saída
+            if (ob_get_level()) {
+                ob_end_clean();
+            }
+        
+            $filename = basename($file);
+        
+            header('Content-Description: File Transfer');
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            header('Content-Transfer-Encoding: binary');
+            header('Expires: 0');
+            header('Cache-Control: must-revalidate');
+            header('Pragma: public');
+            header('Content-Length: ' . filesize($file));
+        
+            readfile($file);
+            exit;
+        });
+
         $app->hook(
             "component(opportunity-evaluation-committee).select-entity:end",
             function () {

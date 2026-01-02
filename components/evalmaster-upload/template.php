@@ -9,26 +9,48 @@ use MapasCulturais\i;
 $this->import("
     entity-file
     mc-modal
+    mc-alert
 ");
 ?>
 
 <div class="valuers-management">
     <mc-modal :title="modalTitle">
         <template v-if="!loading && !hasFile" #default>
-            <p><?php i::_e('Faça upload da planilha de distribuição preechida') ?></p>
+            <p><?php i::_e('Envie a planilha de distribuição devidamente preenchida para realizar a atribuição das avaliações.') ?></p>
+            <br>
+            <mc-alert type="warning">
+                <p><?php i::_e('A planilha deve conter obrigatoriamente as seguintes colunas:') ?></p>
+                <ul>
+                    <li>
+                        <small>
+                            <strong><?php i::_e('INSCRICAO: ') ?></strong>
+                            <small><?php i::_e('Número da inscrição que será avaliada Ex.: on-99999999') ?></small>
+                        </small></li>
+                    <li>
+                        <small>
+                            <strong><?php i::_e('AGENTE: ') ?></strong>
+                            <small><?php i::_e('ID do agente avaliador responsável pela avaliação Ex.: 99999999') ?></small>
+                        </small>
+                    </li>
+                </ul>
+                <br>
+                <p><strong><?php i::_e('Atenção: na coluna AGENTE, utilize sempre o ID do agente avaliador. Não utilize o ID do usuário.') ?></strong></p>
+            </mc-alert>
+
 
             <div class="valuers-management__field">
-                <div>
-                    <label for="fileUpload">
-                        <small class="input-label semibold">
-                            <p>{{fileName}}</p>
-                            <mc-icon name="add"></mc-icon>
-                        </small>
-                    </label>
-                </div>
+                <br>
                 <div class="field">
                     <input type="file" name="file" id="fileUpload" @change="setFile" ref="file">
                 </div>
+            </div>
+            <br>
+            <div>
+                <p>
+                    <a href="<?= $app->createUrl('opportunity', 'sample-ValuersManagement') ?>">
+                        <mc-icon name="download"></mc-icon> <?php i::_e('Baixar modelo de planilha') ?>
+                    </a>
+                </p>
             </div>
         </template>
 
