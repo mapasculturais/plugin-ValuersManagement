@@ -217,7 +217,7 @@ class Plugin extends \MapasCulturais\Plugin
                     continue;
                 }
 
-                $include_list = array_map(fn($item) => (string) $item, $filter_users);
+                $include_list = array_map(fn($item) => (int) $item, $filter_users);
 
                 $valuers_exceptions_list = [
                     'exclude' => [],
