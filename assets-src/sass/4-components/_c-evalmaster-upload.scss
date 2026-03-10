@@ -5,44 +5,94 @@
 
     .valuers-management {
         display: flex;
+    }
+}
 
-        &__field {
+.valuers-management {
+    &__mode {
+        margin-top: size(16);
+    }
+
+    &__mode-title {
+        margin-bottom: size(8);
+    }
+
+    &__mode-options {
+        display: flex;
+        align-items: center;
+        column-gap: size(28);
+        row-gap: size(8);
+        flex-wrap: wrap;
+    }
+
+    &__mode-option {
+        display: inline-flex;
+        align-items: center;
+        gap: size(8);
+        margin: 0;
+
+        input[type='radio'] {
+            margin: 0;
+        }
+    }
+
+    &__mode-help {
+        display: flex;
+        flex-direction: column;
+        gap: size(6);
+        margin-top: size(16);
+    }
+
+    &__mode-help-item {
+        display: block;
+
+        small {
+            display: block;
+            line-height: 1.4;
+        }
+    }
+
+    &__field {
+        align-items: center;
+        background: var(--mc-white-500);
+        border-radius: var(--mc-border-radius-xs);
+        border: size(1) solid var(--mc-gray-300);
+        gap: size(16);
+        justify-content: space-between;
+        margin-top: size(27);
+        padding: size(8) size(8) size(8) size(16); 
+
+        input[type='file'] {
+            display: block;
+            width: 100%;
+        }
+
+        .input-label {
             align-items: center;
-            background: var(--mc-white-500);
-            border-radius: var(--mc-border-radius-xs);
-            border: size(1) solid var(--mc-gray-300);
+            background-color: var(--mc-primary-500);
+            border-radius: var(--mc-border-radius-pill);
+            color: var(--mc-high-500);
+            cursor: pointer;
+            display: flex;
             gap: size(16);
-            justify-content: space-between;
-            margin-top: size(27);
-            padding: size(8) size(8) size(8) size(16); 
-    
-            input[type='file'] {
-                display: none
-            }
-    
-            .input-label {
-                align-items: center;
-                background-color: var(--mc-primary-500);
-                border-radius: var(--mc-border-radius-pill);
-                color: var(--mc-high-500);
-                cursor: pointer;
-                display: flex;
-                gap: size(16);
-                padding: size(8) size(16);
-                width: fit-content;
-            }
+            padding: size(8) size(16);
+            width: fit-content;
+        }
+    }
+
+    &__process {
+        .process__title {
+            margin-bottom: 30px;
         }
 
-        &__process {
-            .process__title {
-                margin-bottom: 30px;
-            }
-
-            .process__action {
-                display: flex;
-                gap: 10px;
-                flex-direction: row-reverse;
-            }
+        .process__action {
+            display: flex;
+            gap: 10px;
+            flex-direction: row-reverse;
         }
+    }
+
+    &__button-icon {
+        margin-right: size(8);
     }
 }

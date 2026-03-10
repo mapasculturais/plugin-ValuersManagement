@@ -3,7 +3,7 @@
 use MapasCulturais\i;
 
 return [
-    "Distribuir avaliacoes em lote" => i::__("Distribuir avaliações em lote"),
+    "Distribuição de avaliações via planilha" => i::__("Distribuição de avaliações via planilha"),
     "Selecione um arquivo" => i::__("Selecione um arquivo"),
     "Arquivo processado com sucesso" => i::__("Arquivo processado com sucesso"),
     "Arquivo deletado com sucesso" => i::__("Arquivo deletado com sucesso"),

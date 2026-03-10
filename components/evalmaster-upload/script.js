@@ -24,13 +24,14 @@ app.component('evalmaster-upload', {
             hasFile: this.entity.opportunity.files['evalmaster'] ? true : false,
             newFile: {},
             loading: false,
-            maxFileSize: $MAPAS.maxUploadSizeFormatted
+            maxFileSize: $MAPAS.maxUploadSizeFormatted,
+            importMode: 'complement'
         }
     },
 
     computed: {
         modalTitle() {
-            return this.text("Distribuir avaliacoes em lote");
+            return this.text("Distribuição de avaliações via planilha");
         },
         fileName() {
             return this.newFile.name ?? this.text('Selecione um arquivo');
@@ -47,7 +48,8 @@ app.component('evalmaster-upload', {
             let args = {
                 entity: this.entity.opportunity.id,
                 file: this.entityFile.id,
-                committee: this.group
+                committee: this.group,
+                mode: this.importMode
             };
 
             let url = Utils.createUrl('opportunity', 'valuersmanagement', args);
