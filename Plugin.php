@@ -8,6 +8,9 @@ use PhpOffice\PhpSpreadsheet\IOFactory;
 
 class Plugin extends \MapasCulturais\Plugin
 {
+    public const IMPORT_MODE_COMPLEMENT = "complement";
+    public const IMPORT_MODE_REPLACE = "replace";
+
     public function _init()
     {
         $app = App::i();
@@ -131,7 +134,9 @@ class Plugin extends \MapasCulturais\Plugin
             $this->pluginLog("[WARN] Planilha vazia após leitura.");
         } else {
             $committee = $request["committee"] ?? null;
-            $this->buildList($data, $file->owner, $committee);
+            $mode = $this->normalizeImportMode($request["mode"] ?? null);
+            $this->pluginLog("[OK] Modo de importação: " . $mode);
+            $this->buildList($data, $file->owner, $committee, $mode);
             $this->pluginLog("[OK] buildList executado");
 
             // Deleta o arquivo após o uso, como no plugin original
@@ -143,12 +148,22 @@ class Plugin extends \MapasCulturais\Plugin
         return true;
     }
 
-    public function buildList($values, Opportunity $opportunity, $committee)
+    public function buildList($values, Opportunity $opportunity, $committee, $mode = self::IMPORT_MODE_COMPLEMENT)
     {
         $app = App::i();
+        $mode = $this->normalizeImportMode($mode ?? self::IMPORT_MODE_COMPLEMENT);
         $this->pluginLog(
-            "[buildList] Iniciado com " . count($values) . " linhas.",
+            "[buildList] Iniciado com " .
+                count($values) .
+                " linhas. Comitê: {$committee}. Modo: {$mode}.",
         );
+
+        if ($mode === self::IMPORT_MODE_REPLACE) {
+            $this->pluginLog(
+                "[buildList][REPLACE] Limpando distribuições pendentes da oportunidade {$opportunity->id} para a comissão {$committee}.",
+            );
+            $this->resetCommitteeForOpportunity($opportunity, $committee);
+        }
 
         // Agrupa os avaliadores por número de inscrição, como no plugin original
         $groupedData = [];
@@ -201,7 +216,7 @@ class Plugin extends \MapasCulturais\Plugin
                 foreach ($users as $user_id) {
                     $user = $app->repo("User")->find($user_id);
 
-                    if($related_agents[$committee]) {
+                    if (!empty($related_agents[$committee])) {
                         foreach($related_agents[$committee] as $relation) {
                             if($relation->id == $user->profile->id) {
                                $filter_users[] = $user->id;
@@ -217,11 +232,33 @@ class Plugin extends \MapasCulturais\Plugin
                     continue;
                 }
 
-                $include_list = array_map(fn($item) => (int) $item, $filter_users);
+                $filter_users = $this->normalizeUserIds($filter_users);
+
+                $valuers = (array) ($registration->valuers ?: []);
+                $current_exceptions = $registration->getValuersExceptionsList();
+
+                $current_include_list = $this->normalizeUserIds(
+                    (array) ($current_exceptions->include ?? []),
+                );
+
+                $current_exclude_list = $this->normalizeUserIds(
+                    (array) ($current_exceptions->exclude ?? []),
+                );
+
+                foreach ($filter_users as $user_id) {
+                    $valuers[$user_id] = $committee;
+                }
+
+                $include_list = $this->normalizeUserIds(
+                    array_merge($current_include_list, $filter_users),
+                );
+                $exclude_list = $this->normalizeUserIds(
+                    array_diff($current_exclude_list, $filter_users),
+                );
 
                 $valuers_exceptions_list = [
-                    'exclude' => [],
-                    'include' => $include_list,
+                    "exclude" => $exclude_list,
+                    "include" => $include_list,
                 ];
 
                 $conn->update(
@@ -230,11 +267,6 @@ class Plugin extends \MapasCulturais\Plugin
                     ['id' => $registration->id]
                 );
 
-                $valuers = $registration->valuers ?: [];
-                foreach ($filter_users as $user_id) {
-                    $valuers[$user_id] = $committee;
-                }
-                
                 if($valuers) {
                     $conn->update('registration', ['valuers' => json_encode($valuers)], ['id' => $registration->id]);
                 }
@@ -243,11 +275,11 @@ class Plugin extends \MapasCulturais\Plugin
 
                 $this->pluginLog(
                     "[buildList] Avaliadores definidos para inscrição $number: " .
-                        implode(", ", $users),
+                        implode(", ", $filter_users),
                 );
 
                 // Coleta todos os user_id para a atualização de cache final
-                $allValuerUserIds = array_merge($allValuerUserIds, $users);
+                $allValuerUserIds = array_merge($allValuerUserIds, $filter_users);
             } catch (\Throwable $e) {
                 $this->pluginLog(
                     "[buildList][ERRO] Exceção na inscrição $number: " .
@@ -270,6 +302,85 @@ class Plugin extends \MapasCulturais\Plugin
         }
 
         $this->pluginLog("[buildList] Finalizado.");
+    }
+
+    protected function normalizeImportMode($mode): string
+    {
+        return $mode === self::IMPORT_MODE_REPLACE
+            ? self::IMPORT_MODE_REPLACE
+            : self::IMPORT_MODE_COMPLEMENT;
+    }
+
+    protected function normalizeUserIds(array $user_ids): array
+    {
+        return array_values(array_unique(array_map("intval", $user_ids)));
+    }
+
+    protected function getCommitteeValuerUserIds(array $valuers, $committee): array
+    {
+        $committee_valuers = [];
+
+        foreach ($valuers as $user_id => $valuer_committee) {
+            if ((string) $valuer_committee === (string) $committee) {
+                $committee_valuers[] = (int) $user_id;
+            }
+        }
+
+        return $this->normalizeUserIds($committee_valuers);
+    }
+
+    protected function resetCommitteeForOpportunity(Opportunity $opportunity, $committee): void
+    {
+        $app = App::i();
+        $conn = $app->em->getConnection();
+
+        // Remove avaliações pendentes da comissão para todas as inscrições da oportunidade
+        $registrations_ids = $conn->fetchFirstColumn(
+            "SELECT id FROM registration WHERE opportunity_id = :opportunity_id",
+            ["opportunity_id" => $opportunity->id],
+        );
+
+        foreach ($registrations_ids as $registration_id) {
+            $conn->delete("registration_evaluation", [
+                "registration_id" => $registration_id,
+                "committee" => $committee,
+                "status" => 0,
+            ]);
+        }
+
+        $registrations = $app->repo("Registration")->findBy(["opportunity" => $opportunity]);
+
+        foreach ($registrations as $registration) {
+            $valuers = (array) ($registration->valuers ?: []);
+            $changed_valuers = false;
+
+            foreach ($valuers as $user_id => $valuer_committee) {
+                if ((string) $valuer_committee === (string) $committee) {
+                    unset($valuers[$user_id]);
+                    $changed_valuers = true;
+                }
+            }
+
+            $exceptions = $registration->getValuersExceptionsList();
+            $exceptions->include = [];
+            $exceptions->exclude = [];
+
+            $update_data = [];
+
+            if ($changed_valuers) {
+                $update_data["valuers"] = json_encode($valuers ?: (object) []);
+            }
+
+            $update_data["valuers_exceptions_list"] = json_encode($exceptions);
+
+            if ($update_data) {
+                $conn->update(
+                    "registration",
+                    $update_data,
+                    ["id" => $registration->id],
+                );
+            }
+        }
     }
 
     protected function getCommitteeFromAgent(Opportunity $opportunity, $agentId)
