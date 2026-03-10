@@ -91,7 +91,7 @@ $this->import("
             </div>
             <div v-if="!hasFile">
                 <div class="col-6">
-                    <button class="button button--text button--large button--md" @click="cancel(modal)"><?php i::_e('Cancelar') ?></button>
+                    <button class="button button--text button--large button--md" @click="modal.close()"><?php i::_e('Cancelar') ?></button>
                 </div>
                 <div class="col-6">
                     <button class="button button--primary button--large button--md" @click="upload(modal)"><?php i::_e('Enviar') ?></button>
