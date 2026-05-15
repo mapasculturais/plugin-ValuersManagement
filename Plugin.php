@@ -352,8 +352,11 @@ class Plugin extends \MapasCulturais\Plugin
 
         foreach ($registrations as $registration) {
             $valuers = (array) ($registration->valuers ?: []);
-            $changed_valuers = false;
 
+            // user_ids que pertencem à comissão alvo (coletados antes do unset)
+            $committee_user_ids = $this->getCommitteeValuerUserIds($valuers, $committee);
+
+            $changed_valuers = false;
             foreach ($valuers as $user_id => $valuer_committee) {
                 if ((string) $valuer_committee === (string) $committee) {
                     unset($valuers[$user_id]);
@@ -362,8 +365,13 @@ class Plugin extends \MapasCulturais\Plugin
             }
 
             $exceptions = $registration->getValuersExceptionsList();
-            $exceptions->include = [];
-            $exceptions->exclude = [];
+
+            $current_include = $this->normalizeUserIds((array) ($exceptions->include ?? []));
+            $current_exclude = $this->normalizeUserIds((array) ($exceptions->exclude ?? []));
+
+            // remove só os user_ids da comissão alvo, preservando exceções de outras comissões
+            $exceptions->include = array_values(array_diff($current_include, $committee_user_ids));
+            $exceptions->exclude = array_values(array_diff($current_exclude, $committee_user_ids));
 
             $update_data = [];
 
@@ -371,7 +379,9 @@ class Plugin extends \MapasCulturais\Plugin
                 $update_data["valuers"] = json_encode($valuers ?: (object) []);
             }
 
-            $update_data["valuers_exceptions_list"] = json_encode($exceptions);
+            if ($exceptions->include !== $current_include || $exceptions->exclude !== $current_exclude) {
+                $update_data["valuers_exceptions_list"] = json_encode($exceptions);
+            }
 
             if ($update_data) {
                 $conn->update(
@@ -379,6 +389,9 @@ class Plugin extends \MapasCulturais\Plugin
                     $update_data,
                     ["id" => $registration->id],
                 );
+                // Alinha a entidade em memória com o UPDATE direto; caso contrário,
+                // buildList() leria valuers desatualizados pelo mapa de identidade do Doctrine.
+                $app->em->refresh($registration);
             }
         }
     }
