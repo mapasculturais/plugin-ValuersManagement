@@ -68,6 +68,7 @@ class Plugin extends \MapasCulturais\Plugin
             $app,
         ) {
             ini_set("max_execution_time", "0");
+            ini_set("memory_limit", "4096M");
             $this->requireAuthentication();
 
             $opportunity = $app
@@ -158,13 +159,6 @@ class Plugin extends \MapasCulturais\Plugin
                 " linhas. Comitê: {$committee}. Modo: {$mode}.",
         );
 
-        if ($mode === self::IMPORT_MODE_REPLACE) {
-            $this->pluginLog(
-                "[buildList][REPLACE] Limpando distribuições pendentes da oportunidade {$opportunity->id} para a comissão {$committee}.",
-            );
-            $this->resetCommitteeForOpportunity($opportunity, $committee);
-        }
-
         // Agrupa os avaliadores por número de inscrição, como no plugin original
         $groupedData = [];
         foreach ($values as $item) {
@@ -176,6 +170,13 @@ class Plugin extends \MapasCulturais\Plugin
                     $groupedData[$number][] = $agentId;
                 }
             }
+        }
+
+        if ($mode === self::IMPORT_MODE_REPLACE) {
+            $this->pluginLog(
+                "[buildList][REPLACE] Limpando distribuições pendentes da oportunidade {$opportunity->id} para a comissão {$committee}, apenas nas inscrições da planilha.",
+            );
+            $this->resetCommitteeForOpportunity($opportunity, $committee, array_keys($groupedData));
         }
 
         $allValuerUserIds = [];
@@ -329,32 +330,57 @@ class Plugin extends \MapasCulturais\Plugin
         return $this->normalizeUserIds($committee_valuers);
     }
 
-    protected function resetCommitteeForOpportunity(Opportunity $opportunity, $committee): void
+    protected function resetCommitteeForOpportunity(Opportunity $opportunity, $committee, array $registration_numbers): void
     {
         $app = App::i();
         $conn = $app->em->getConnection();
 
-        // Remove avaliações pendentes da comissão para todas as inscrições da oportunidade
-        $registrations_ids = $conn->fetchFirstColumn(
-            "SELECT id FROM registration WHERE opportunity_id = :opportunity_id",
-            ["opportunity_id" => $opportunity->id],
-        );
-
-        foreach ($registrations_ids as $registration_id) {
-            $conn->delete("registration_evaluation", [
-                "registration_id" => $registration_id,
-                "committee" => $committee,
-                "status" => 0,
-            ]);
+        if (empty($registration_numbers)) {
+            $this->pluginLog(
+                "[resetCommitteeForOpportunity][WARN] Nenhuma inscrição encontrada na planilha. Nada será limpo.",
+            );
+            return;
         }
 
-        $registrations = $app->repo("Registration")->findBy(["opportunity" => $opportunity]);
+        foreach ($registration_numbers as $number) {
+            $registration = $app->repo("Registration")->findOneBy([
+                "opportunity" => $opportunity,
+                "number" => $number,
+            ]);
 
-        foreach ($registrations as $registration) {
+            if (!$registration) {
+                $this->pluginLog(
+                    "[resetCommitteeForOpportunity][WARN] Inscrição $number não encontrada. Nada será limpo para ela.",
+                );
+                continue;
+            }
+
             $valuers = (array) ($registration->valuers ?: []);
 
-            // user_ids que pertencem à comissão alvo (coletados antes do unset)
             $committee_user_ids = $this->getCommitteeValuerUserIds($valuers, $committee);
+
+            if (empty($committee_user_ids)) {
+                continue;
+            }
+
+            $active_evaluation_user_ids = $this->getActiveEvaluationUserIds($registration->id, $committee_user_ids);
+
+            if (!empty($active_evaluation_user_ids)) {
+                $this->pluginLog(
+                    "[resetCommitteeForOpportunity][KEEP] Inscrição {$registration->number} possui avaliação iniciada/concluída/enviada na comissão {$committee} pelos usuários: " .
+                        implode(", ", $active_evaluation_user_ids) .
+                        ". O replace será tratado como complemento para esta inscrição.",
+                );
+                continue;
+            }
+
+            $conn->executeStatement(
+                "DELETE FROM registration_evaluation WHERE registration_id = :registration_id AND committee = :committee AND status IS NULL",
+                [
+                    "registration_id" => $registration->id,
+                    "committee" => $committee,
+                ],
+            );
 
             $changed_valuers = false;
             foreach ($valuers as $user_id => $valuer_committee) {
@@ -394,6 +420,25 @@ class Plugin extends \MapasCulturais\Plugin
                 $app->em->refresh($registration);
             }
         }
+    }
+
+    protected function getActiveEvaluationUserIds($registration_id, array $user_ids): array
+    {
+        if (empty($user_ids)) {
+            return [];
+        }
+
+        $app = App::i();
+        $conn = $app->em->getConnection();
+        $user_ids = $this->normalizeUserIds($user_ids);
+        $user_ids_sql = implode(", ", $user_ids);
+
+        return $this->normalizeUserIds(
+            $conn->fetchFirstColumn(
+                "SELECT user_id FROM registration_evaluation WHERE registration_id = :registration_id AND user_id IN ($user_ids_sql) AND status IS NOT NULL",
+                ["registration_id" => $registration_id],
+            ),
+        );
     }
 
     protected function getCommitteeFromAgent(Opportunity $opportunity, $agentId)
