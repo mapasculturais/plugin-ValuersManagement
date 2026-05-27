@@ -5,11 +5,15 @@ namespace ValuersManagement;
 use MapasCulturais\App;
 use MapasCulturais\Entities\Opportunity;
 use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\RichText\RichText;
 
 class Plugin extends \MapasCulturais\Plugin
 {
     public const IMPORT_MODE_COMPLEMENT = "complement";
     public const IMPORT_MODE_REPLACE = "replace";
+
+    public const FILE_GROUP_PENDING = "evalmaster";
+    public const FILE_GROUP_HISTORY = "evalmaster-history";
 
     public function _init()
     {
@@ -22,6 +26,26 @@ class Plugin extends \MapasCulturais\Plugin
         );
 
         $self = $this;
+
+        // Workaround: o controller de upload do core (POST_upload) só persiste
+        // `description` quando o FileGroup é unique=true. Como nosso grupo
+        // "evalmaster" aceita múltiplos arquivos (um por comissão), o committee
+        // enviado no description pelo frontend seria descartado. Esse hook
+        // captura o description vindo do request e o injeta no File antes do
+        // save, mantendo o isolamento por comissão.
+        $app->hook("entity(OpportunityFile).upload.filesSave:before", function ($file) {
+            if ($file->group !== Plugin::FILE_GROUP_PENDING) {
+                return;
+            }
+            $data = $this->data ?? [];
+            if (!is_array($data)) {
+                return;
+            }
+            $description = $data["description"] ?? null;
+            if (is_array($description) && isset($description[$file->group])) {
+                $file->description = $description[$file->group];
+            }
+        });
 
         // Endpoint para download do modelo de planilha
         $app->hook("GET(opportunity.sample-ValuersManagement)", function () {
@@ -88,24 +112,27 @@ class Plugin extends \MapasCulturais\Plugin
                 "[Hook] Requisição recebida: " . json_encode($request),
             );
 
-            if ($self->valuersmanagement($request)) {
-                $this->json(true);
-            }
+            $result = $self->valuersmanagement($request);
+            $this->json($result, $result["success"] ? 200 : 400);
         });
     }
 
-    protected function pluginLog(string $message)
+    protected function pluginLog(string $message): void
     {
-        $logDir = __DIR__ . "/logs";
-        if (!is_dir($logDir)) {
-            mkdir($logDir, 0777, true);
+        // Em testes (PHPUnit), o handler do Monolog escreve em STDERR e
+        // qualquer saída durante o teste é considerada falha — silencia.
+        if (defined('PHPUNIT_COMPOSER_INSTALL') || defined('__PHPUNIT_PHAR__')) {
+            return;
         }
-
-        $logFile = $logDir . "/valuersmanagement.log";
-        $date = date("Y-m-d H:i:s");
-        $formattedMessage = "[$date] $message" . PHP_EOL;
-
-        file_put_contents($logFile, $formattedMessage, FILE_APPEND);
+        $app = App::i();
+        if (!isset($app->log) || !is_object($app->log)) {
+            return;
+        }
+        try {
+            $app->log->info("[ValuersManagement] " . $message);
+        } catch (\Throwable $e) {
+            // Logger indisponível — não escalar o erro só por causa de log.
+        }
     }
 
     public function valuersmanagement($request)
@@ -115,38 +142,95 @@ class Plugin extends \MapasCulturais\Plugin
             "[INICIO] valuersmanagement - request: " . json_encode($request),
         );
 
-        $file = $app->repo("File")->find($request["file"]);
-        if (!$file) {
-            $this->pluginLog(
-                "[ERRO] Arquivo não encontrado: ID " . $request["file"],
-            );
-            return true;
-        }
+        try {
+            $file = $app->repo("File")->find($request["file"]);
+            if (!$file) {
+                $this->pluginLog(
+                    "[ERRO] Arquivo não encontrado: ID " . $request["file"],
+                );
+                return [
+                    "success" => false,
+                    "message" => \MapasCulturais\i::__("Arquivo da planilha não encontrado."),
+                ];
+            }
 
-        $this->pluginLog("[OK] Arquivo encontrado: " . $file->getPath());
+            $this->pluginLog("[OK] Arquivo encontrado: " . $file->getPath());
 
-        $spreadsheet = IOFactory::load($file->getPath());
-        $this->pluginLog("[OK] Planilha carregada");
+            $spreadsheet = IOFactory::load($file->getPath());
+            $this->pluginLog("[OK] Planilha carregada");
 
-        $data = $this->getSpreadsheetData($spreadsheet);
-        $this->pluginLog("[OK] Linhas extraídas: " . count($data));
+            $data = $this->getSpreadsheetData($spreadsheet);
+            $this->pluginLog("[OK] Linhas extraídas: " . count($data));
 
-        if (empty($data)) {
-            $this->pluginLog("[WARN] Planilha vazia após leitura.");
-        } else {
+            if (empty($data)) {
+                $this->pluginLog("[WARN] Planilha vazia após leitura.");
+                return [
+                    "success" => false,
+                    "message" => \MapasCulturais\i::__("A planilha não contém dados para importar."),
+                ];
+            }
+
             $committee = $request["committee"] ?? null;
             $mode = $this->normalizeImportMode($request["mode"] ?? null);
             $this->pluginLog("[OK] Modo de importação: " . $mode);
+
             $this->buildList($data, $file->owner, $committee, $mode);
             $this->pluginLog("[OK] buildList executado");
 
-            // Deleta o arquivo após o uso, como no plugin original
-            $app->repo("File")->find($request["file"])->delete(true);
-            $this->pluginLog("[OK] Arquivo deletado.");
-        }
+            // Move o arquivo para o histórico em vez de deletar, preservando
+            // a planilha para auditoria/download posterior.
+            $history = $this->archiveProcessedFile($file, [
+                "committee" => $committee,
+                "mode" => $mode,
+                "rows_total" => count($data),
+                "processed_at" => date("c"),
+                "processed_by" => $app->user && $app->user->id ? (int) $app->user->id : null,
+            ]);
 
-        $this->pluginLog("[FIM] valuersmanagement");
-        return true;
+            $this->pluginLog(
+                "[OK] Arquivo arquivado no histórico. ID={$history->id}, group={$history->group}",
+            );
+
+            return [
+                "success" => true,
+                "message" => \MapasCulturais\i::__("Planilha processada com sucesso."),
+                "history_file_id" => $history->id,
+            ];
+        } catch (\Throwable $e) {
+            $this->pluginLog(
+                "[ERRO] Exceção em valuersmanagement: " . get_class($e) . ": " . $e->getMessage(),
+            );
+            return [
+                "success" => false,
+                "message" => \MapasCulturais\i::__("Falha ao processar a planilha: ") . $e->getMessage(),
+            ];
+        } finally {
+            $this->pluginLog("[FIM] valuersmanagement");
+        }
+    }
+
+    /**
+     * Move o arquivo processado do grupo "evalmaster" para "evalmaster-history",
+     * gravando metadados do processamento na propriedade `description` (JSON).
+     * Faz merge com metadados pré-existentes (ex.: `committee` gravado no
+     * upload), garantindo que a planilha continue corretamente associada à
+     * comissão correspondente.
+     */
+    protected function archiveProcessedFile(\MapasCulturais\Entities\File $file, array $metadata): \MapasCulturais\Entities\File
+    {
+        $existing = [];
+        if (is_string($file->description) && $file->description !== '') {
+            $decoded = json_decode($file->description, true);
+            if (is_array($decoded)) {
+                $existing = $decoded;
+            }
+        }
+        $merged = array_merge($existing, $metadata);
+
+        $file->group = self::FILE_GROUP_HISTORY;
+        $file->description = json_encode($merged, JSON_UNESCAPED_UNICODE);
+        $file->save(true);
+        return $file;
     }
 
     public function buildList($values, Opportunity $opportunity, $committee, $mode = self::IMPORT_MODE_COMPLEMENT)
@@ -159,15 +243,19 @@ class Plugin extends \MapasCulturais\Plugin
                 " linhas. Comitê: {$committee}. Modo: {$mode}.",
         );
 
-        // Agrupa os avaliadores por número de inscrição, como no plugin original
+        // Agrupa os avaliadores por número de inscrição, como no plugin original.
+        // Normaliza a chave para minúsculas para tolerar variações de caixa entre
+        // planilha e banco (ex.: "on-123" vs "ON-123"), já que em diferentes
+        // ambientes o `Registration.number` pode estar gravado em qualquer caso.
         $groupedData = [];
         foreach ($values as $item) {
             $number = $this->getNumber($item);
             if ($number) {
-                $groupedData[$number] = $groupedData[$number] ?? [];
+                $key = $this->normalizeRegistrationNumber($number);
+                $groupedData[$key] = $groupedData[$key] ?? [];
                 $agentId = $this->getAgent($item);
                 if ($agentId) {
-                    $groupedData[$number][] = $agentId;
+                    $groupedData[$key][] = $agentId;
                 }
             }
         }
@@ -186,10 +274,7 @@ class Plugin extends \MapasCulturais\Plugin
             try {
                 $this->pluginLog("[buildList] Processando inscrição $number.");
 
-                $registration = $app->repo("Registration")->findOneBy([
-                    "opportunity" => $opportunity,
-                    "number" => $number,
-                ]);
+                $registration = $this->findRegistrationByNumber($opportunity, $number);
 
                 if (!$registration) {
                     $this->pluginLog(
@@ -343,10 +428,7 @@ class Plugin extends \MapasCulturais\Plugin
         }
 
         foreach ($registration_numbers as $number) {
-            $registration = $app->repo("Registration")->findOneBy([
-                "opportunity" => $opportunity,
-                "number" => $number,
-            ]);
+            $registration = $this->findRegistrationByNumber($opportunity, $number);
 
             if (!$registration) {
                 $this->pluginLog(
@@ -484,7 +566,8 @@ class Plugin extends \MapasCulturais\Plugin
                     "número",
                 ])
             ) {
-                return $value;
+                $value = $this->normalizeCellValue($value);
+                return $value === null || $value === "" ? null : (string) $value;
             }
         }
         return null;
@@ -500,10 +583,72 @@ class Plugin extends \MapasCulturais\Plugin
                     "id do avaliador",
                 ])
             ) {
-                return $value;
+                $value = $this->normalizeCellValue($value);
+                if ($value === null || $value === "") {
+                    return null;
+                }
+                return is_numeric($value) ? (int) $value : $value;
             }
         }
         return null;
+    }
+
+    /**
+     * Normaliza o valor lido de uma célula. PhpSpreadsheet retorna instâncias de
+     * RichText quando a célula referencia uma sharedString formada por múltiplos
+     * runs (típico de planilhas que sofreram copy/paste ou que vêm com formatação
+     * parcial, como anexos compartilhados via WhatsApp). Sem essa normalização,
+     * usar o valor como chave de array dispara TypeError em PHP 8+.
+     */
+    protected function normalizeCellValue($value)
+    {
+        if ($value instanceof RichText) {
+            $value = $value->getPlainText();
+        }
+
+        if (is_string($value)) {
+            $value = trim($value);
+        }
+
+        return $value;
+    }
+
+    /**
+     * Normaliza um número de inscrição para comparação/agrupamento.
+     * O prefixo da inscrição pode chegar em caixa diferente da gravada no banco
+     * dependendo do ambiente (ex.: "on-123" vs "ON-123"); por isso, comparamos
+     * em minúsculas tanto na chave do groupedData quanto na consulta SQL.
+     */
+    protected function normalizeRegistrationNumber($number): string
+    {
+        return mb_strtolower(trim((string) $number));
+    }
+
+    /**
+     * Busca uma Registration pela oportunidade e pelo número, ignorando a caixa
+     * do prefixo. Usa DQL com LOWER() nos dois lados para casar "on-XYZ" ou
+     * "ON-XYZ" tanto na entrada quanto no banco.
+     */
+    protected function findRegistrationByNumber(Opportunity $opportunity, $number)
+    {
+        if ($number === null || $number === '') {
+            return null;
+        }
+
+        $app = App::i();
+
+        return $app->em
+            ->createQuery(
+                'SELECT r FROM MapasCulturais\\Entities\\Registration r ' .
+                'WHERE r.opportunity = :opportunity ' .
+                'AND LOWER(r.number) = LOWER(:number)'
+            )
+            ->setParameters([
+                'opportunity' => $opportunity,
+                'number' => (string) $number,
+            ])
+            ->setMaxResults(1)
+            ->getOneOrNullResult();
     }
 
     public function getSpreadsheetData($spreadsheet)
@@ -531,7 +676,7 @@ class Plugin extends \MapasCulturais\Plugin
             $columnIndex = 0;
             foreach ($cellIterator as $cell) {
                 $headerValue = $header[$columnIndex] ?? "col$columnIndex";
-                $cellValue = $cell->getValue();
+                $cellValue = $this->normalizeCellValue($cell->getValue());
                 if ($cellValue !== null && $cellValue !== "") {
                     $rowData[$headerValue] = $cellValue;
                 }
@@ -553,7 +698,8 @@ class Plugin extends \MapasCulturais\Plugin
         $cellIterator->setIterateOnlyExistingCells(false);
 
         foreach ($cellIterator as $cell) {
-            $header[] = $cell->getValue();
+            $value = $this->normalizeCellValue($cell->getValue());
+            $header[] = $value === null ? "" : (string) $value;
         }
 
         return $header;
@@ -562,18 +708,37 @@ class Plugin extends \MapasCulturais\Plugin
     public function register()
     {
         $app = App::i();
-        $file_group_definition = new \MapasCulturais\Definitions\FileGroup(
-            "evalmaster",
-            [
-                '^text/csv$',
-                '^application/vnd.ms-excel$',
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ],
-            "O arquivo enviado não é válido.",
-            true,
+
+        $allowed_mime_types = [
+            '^text/csv$',
+            '^application/vnd.ms-excel$',
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ];
+        $error_message = \MapasCulturais\i::__("O arquivo enviado não é válido.");
+
+        // Grupo das planilhas pendentes — aceita múltiplos arquivos (uma por
+        // comissão). O isolamento por comissão é feito via a property
+        // `description` do arquivo, que carrega um JSON com `committee`.
+        $pending = new \MapasCulturais\Definitions\FileGroup(
+            self::FILE_GROUP_PENDING,
+            $allowed_mime_types,
+            $error_message,
+            false,
             null,
             true,
         );
-        $app->registerFileGroup("opportunity", $file_group_definition);
+        $app->registerFileGroup("opportunity", $pending);
+
+        // Grupo do histórico — múltiplos arquivos, preservados para auditoria
+        // e download das planilhas já processadas.
+        $history = new \MapasCulturais\Definitions\FileGroup(
+            self::FILE_GROUP_HISTORY,
+            $allowed_mime_types,
+            $error_message,
+            false,
+            null,
+            true,
+        );
+        $app->registerFileGroup("opportunity", $history);
     }
 }

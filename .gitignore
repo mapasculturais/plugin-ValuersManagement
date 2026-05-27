@@ -3,3 +3,4 @@ assets/js/app.js
 assets/css/plugin-ValuersManagement.css
 mix-manifest.json
 node_modules/
+logs/
