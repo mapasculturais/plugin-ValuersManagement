@@ -17,6 +17,11 @@ $this->import("
 <div class="valuers-management">
     <mc-modal :title="modalTitle">
         <template #default>
+            <mc-alert v-if="evaluationNotStarted" type="warning">
+                <p><?php i::_e('A fase de avaliação ainda não foi iniciada.') ?></p>
+                <p><?php i::_e('Por isso, a importação da distribuição de avaliações não está disponível no momento. A funcionalidade ficará disponível automaticamente assim que a fase de avaliação começar.') ?></p>
+            </mc-alert>
+            <template v-else>
             <template v-if="!hasPendingFile">
                 <mc-alert type="warning">
                     <p><?php i::_e('A planilha deve conter obrigatoriamente as seguintes colunas:') ?></p>
@@ -190,6 +195,7 @@ $this->import("
                     </li>
                 </ul>
             </div>
+            </template>
         </template>
 
         <template #button="modal">
@@ -204,7 +210,7 @@ $this->import("
                     <?php i::_e('Cancelar') ?>
                 </button>
             </div>
-            <div v-if="hasPendingFile" class="col-6">
+            <div v-if="hasPendingFile && !evaluationNotStarted" class="col-6">
                 <button
                     class="button button--primary button--large button--md"
                     @click="processFile(modal)"

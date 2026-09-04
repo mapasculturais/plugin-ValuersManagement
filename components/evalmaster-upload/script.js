@@ -37,6 +37,12 @@ app.component('evalmaster-upload', {
             return this.text('Distribuição de avaliações via planilha');
         },
 
+        // Guarda de fase de avaliação: enquanto evaluationFrom estiver
+        // no futuro, a importação da distribuição fica indisponível.
+        evaluationNotStarted() {
+            return this.entity.evaluationFrom?.isFuture() ?? false;
+        },
+
         opportunity() {
             return this.entity.opportunity;
         },
